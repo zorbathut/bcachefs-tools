@@ -1565,7 +1565,7 @@ struct bch_readdir_ctx32 {
 	bool				full;
 };
 
-#if defined(__KERNEL__) && LINUX_VERSION_CODE >= KERNEL_VERSION(7,1,0)
+#ifdef __KERNEL__
 typedef bool bch2_filldir_ret_t;
 #define bch2_filldir_ret_success(_ret)	(_ret)
 #else
