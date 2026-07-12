@@ -117,6 +117,8 @@ enum bch_counters_flags {
 	  "Stripe extent update failures")				\
 	x(copygc,				40,  TYPE_COUNTER,	\
 	  "Copygc runs")						\
+	x(copygc_fail,				136, TYPE_COUNTER,	\
+	  "Copygc runs that evacuated candidates but moved no data")	\
 	x(copygc_wait_obsolete,			41,  TYPE_COUNTER,	\
 	  "Obsolete: copygc waits")					\
 	x(cached_ptr_drop,			121, TYPE_SECTORS,	\

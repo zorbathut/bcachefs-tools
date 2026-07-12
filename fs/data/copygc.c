@@ -540,6 +540,29 @@ err:
 			   buckets_in_flight->to_evacuate.nr, sectors_seen, sectors_moved);
 	}));
 
+	/*
+	 * Candidates evacuated without error and nothing resolved to an
+	 * extent: is_movable approved buckets that evacuation can't make
+	 * progress on (stale alloc info or LRU entries, unresolvable
+	 * backpointers). We're about to take the io-clock backoff rather
+	 * than respin, so this fires once per wakeup, not per spin - count
+	 * it so a stuck population is visible in the counters. (The other
+	 * no-progress family - extents resolve but every update fails - is
+	 * counted by data_update_fail.)
+	 */
+	if (!ret && !*did_work && buckets_in_flight->to_evacuate.nr)
+		event_inc_trace(c, copygc_fail, buf, ({
+			prt_printf(&buf, "%zu candidates\n",
+				   buckets_in_flight->to_evacuate.nr);
+			unsigned n = 0;
+			for (struct move_bucket *b = buckets_in_flight->first;
+			     b && n < 8;
+			     b = b->next, n++)
+				prt_printf(&buf, "%llu:%llu gen %u sectors %u\n",
+					   b->k.bucket.inode, b->k.bucket.offset,
+					   b->k.generation, b->sectors);
+		}));
+
 	darray_for_each(buckets_in_flight->to_evacuate, i)
 		if (*i)
 			move_bucket_free(buckets_in_flight, *i);
