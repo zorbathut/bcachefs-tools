@@ -229,8 +229,26 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 
+    /// Force an offline, read-only open even if the filesystem appears
+    /// mounted - for inspecting devices that are currently mounting or
+    /// recovering. Opened noexcl|nochanges|read_only, so it never issues a
+    /// write (see bch2_write_super/journal_write/btree_node_write, all gated
+    /// on nochanges) and cannot corrupt; worst case the open fails or reads
+    /// are torn while the kernel writes underneath it.
+    #[arg(long)]
+    offline: bool,
+
     #[arg(required(true))]
     devices: Vec<std::path::PathBuf>,
+}
+
+fn list_offline(fs: &Fs, opt: &Cli) -> anyhow::Result<()> {
+    match opt.mode {
+        Mode::Keys => list_keys(fs, opt),
+        Mode::Formats => list_btree_formats(fs, opt),
+        Mode::Nodes => list_btree_nodes(fs, opt),
+        Mode::NodesOndisk => list_nodes_ondisk(fs, opt),
+    }
 }
 
 fn cmd_list_inner(opt: &Cli) -> anyhow::Result<()> {
@@ -260,6 +278,17 @@ fn cmd_list_inner(opt: &Cli) -> anyhow::Result<()> {
         opt_set!(fs_opts, verbose, 1);
     }
 
+    if opt.offline {
+        // Skip the mounted-fs check and open the devices directly. Safe
+        // against a live/mounting filesystem: noexcl avoids fighting the
+        // kernel's claim, and nochanges|read_only suppress every device
+        // write, so this can't corrupt - it can only fail to open or read
+        // torn data. Online listing (--fsck aside) isn't possible here
+        // anyway, since QUERY_BTREE_KEYS is gated on the fs being started.
+        let fs = crate::device_scan::open_scan(&opt.devices, fs_opts)?;
+        return list_offline(&fs, opt);
+    }
+
     match crate::device_scan::open_online_or_offline(&opt.devices, fs_opts)? {
         OpenedFs::Online(handle) => {
             // The filesystem is mounted: read keys through the kernel. For
@@ -281,12 +310,7 @@ fn cmd_list_inner(opt: &Cli) -> anyhow::Result<()> {
 
             list_online(&handle, &fs, opt)
         }
-        OpenedFs::Offline(fs) => match opt.mode {
-            Mode::Keys => list_keys(&fs, opt),
-            Mode::Formats => list_btree_formats(&fs, opt),
-            Mode::Nodes => list_btree_nodes(&fs, opt),
-            Mode::NodesOndisk => list_nodes_ondisk(&fs, opt),
-        },
+        OpenedFs::Offline(fs) => list_offline(&fs, opt),
     }
 }
 
