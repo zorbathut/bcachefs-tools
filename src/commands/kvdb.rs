@@ -59,13 +59,16 @@ Commands:\n\
   peek_prev <btree> <pos>                    last key <= pos\n\
   list      <btree> [start] [end]            keys in range\n\
   update    <btree> <pos> <field=val>...     modify fields of an existing key\n\
-  set       <btree> <pos> <type> [field=val]...  insert a whole new key\n\n\
+  set  [-s] <btree> <pos> <type> [field=val]...  insert a whole new key\n\n\
 pos is inode:offset[:snapshot], or POS_MIN/POS_MAX/SPOS_MAX. Fields are \
 val struct fields: parent, children[1], btime.hi, ... Declared flag bits \
 (LE*_BITMASK) resolve by name too: no_keys=1, or qualified as flags.subvol=0 \
 when the name collides with a field. get decodes them: flags: 10 (subvol|no_keys). \
 Values are decimal, 0x hex, or negative decimal. `set <btree> <pos> deleted` \
-deletes a key.\n\n\
+deletes a key - a raw delete: on snapshots btrees no whiteout is left, so \
+ancestor versions become visible at that snapshot. With -s, set uses normal \
+filesystem update semantics instead: a deleted-key insert converts to a \
+whiteout when needed, making the position read as absent in that snapshot.\n\n\
 Updates go through the normal transactional path: journalled, triggers run, \
 key validation applies. This tool can corrupt a filesystem in precise, \
 surgical ways - that is its purpose. Use accordingly.")]
@@ -415,6 +418,7 @@ fn cmd_set(
     pos: c::bpos,
     type_name: &str,
     assigns: &[(&str, FieldVal)],
+    snapshot_semantics: bool,
 ) -> Result<String> {
     let ti = typeinfo::bkey_type_info_by_name(type_name)
         .ok_or_else(|| anyhow!("unknown key type '{type_name}'"))?;
@@ -459,7 +463,28 @@ fn cmd_set(
                 }
             }
 
-            t.insert_nonextent(btree, new, UpdateTriggerFlags::INTERNAL_SNAPSHOT_NODE)
+            if snapshot_semantics {
+                // -s: normal filesystem update semantics - filter_snapshots
+                // addressing, so a deleted-key insert converts to a whiteout
+                // when an ancestor version would otherwise become visible:
+                // "make this position read as absent in this snapshot".
+                t.insert_nonextent(btree, new, UpdateTriggerFlags::INTERNAL_SNAPSHOT_NODE)
+            } else {
+                // Raw exact addressing, like update: an all_snapshots iter,
+                // so `set <pos> deleted` really removes the key. Injecting a
+                // truly-absent key (vs deleted-in-this-snapshot) is the
+                // difference between reproducing lost-btree-data corruption
+                // and merely unlinking; a whiteout is also available
+                // explicitly as `set <pos> whiteout`.
+                let mut iter = BtreeIter::new(
+                    t.trans(),
+                    btree,
+                    pos,
+                    RAW_EXACT | BtreeIterFlags::INTENT,
+                );
+                let t = iter.traverse(t)?;
+                t.update(&mut iter, new, UpdateTriggerFlags::INTERNAL_SNAPSHOT_NODE)
+            }
         },
     );
 
@@ -518,7 +543,9 @@ peek      <btree> <pos>                        first key >= pos
 peek_prev <btree> <pos>                        last key <= pos
 list      <btree> [start] [end]                keys in range
 update    <btree> <pos> <field=val>...         modify fields of an existing key
-set       <btree> <pos> <type> [field=val]...  insert a whole new key
+set  [-s] <btree> <pos> <type> [field=val]...  insert a whole new key
+          (raw addressing by default: set deleted really removes the key;
+           -s uses visibility semantics - deletions whiteout as needed)
           values are integers; fields holding enum codewords (snapshot/
           subvolume state) also accept the value name, e.g. state=will_delete
 sb get    <field>                              read a superblock field/flag
@@ -604,8 +631,12 @@ fn run_line(kvdb_fs: &KvdbFs, nostart: bool, line: &str) -> Result<()> {
             cmd_update(fs, parse_btree(btree)?, parse_pos(pos)?, &assigns)?
         }
         "set" => {
+            let (snapshot_semantics, args) = match args.split_first() {
+                Some((&"-s", rest)) => (true, rest),
+                _ => (false, args),
+            };
             let [btree, pos, type_name, assigns @ ..] = args else {
-                bail!("usage: set <btree> <pos> <type> [field=val]...");
+                bail!("usage: set [-s] <btree> <pos> <type> [field=val]...");
             };
             let KvdbFs::Offline(fs) = kvdb_fs else {
                 bail!("filesystem is mounted: kvdb is read-only on mounted filesystems");
@@ -614,7 +645,8 @@ fn run_line(kvdb_fs: &KvdbFs, nostart: bool, line: &str) -> Result<()> {
                 .iter()
                 .map(|s| parse_assign(s))
                 .collect::<Result<Vec<_>>>()?;
-            cmd_set(fs, parse_btree(btree)?, parse_pos(pos)?, type_name, &assigns)?
+            cmd_set(fs, parse_btree(btree)?, parse_pos(pos)?, type_name, &assigns,
+                    snapshot_semantics)?
         }
         "sb" => {
             let (&sub, rest) = args.split_first()
