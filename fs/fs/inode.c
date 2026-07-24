@@ -5,6 +5,7 @@
 #include "alloc/accounting.h"
 #include "alloc/buckets.h"
 
+#include "btree/cache.h"
 #include "btree/key_cache.h"
 #include "btree/locking.h"
 #include "btree/write_buffer.h"
@@ -30,6 +31,7 @@
 
 #include "util/varint.h"
 
+#include <linux/module.h>
 #include <linux/random.h>
 #include <linux/unaligned.h>
 
@@ -47,6 +49,27 @@ static const char * const bch2_inode_flag_strs[] = {
 
 static int delete_ancestor_snapshot_inodes(struct btree_trans *, struct bpos);
 static int may_delete_deleted_inum(struct btree_trans *, subvol_inum, struct bch_inode_unpacked *);
+
+/*
+ * HACK, NOT FOR UPSTREAM - "where did the deus damage start" experiment.
+ *
+ * __bch2_inode_rm_snapshot() deletes an inode version's extents/dirents/xattrs
+ * with the return values discarded, then deletes the inode key itself with a
+ * checked commit. bch2_btree_delete_range_trans() commits internally and can
+ * return a real error (ENOMEM, EIO, ENOSPC on the reservation) - so any
+ * transient failure there leaves content behind at that snapshot id while the
+ * inode version goes away. That is exactly the precondition the runtime
+ * snapshot-deletion sweep is gated on, and exactly the shape deus's log
+ * witnesses ("have key for inode X but have inode in ancestor snapshot Y").
+ *
+ * This knob makes that failure happen on demand, on the same code path, with
+ * the error discarded the same way the real code discards it.
+ * Bitmask: 1 = extents, 2 = dirents, 4 = xattrs.
+ */
+static unsigned bch2_inode_rm_fail_content;
+module_param_named(inode_rm_fail_content, bch2_inode_rm_fail_content, uint, 0644);
+MODULE_PARM_DESC(inode_rm_fail_content,
+		 "fault injection: fail content deletion in __bch2_inode_rm_snapshot (1=extents 2=dirents 4=xattrs)");
 
 static const u8 byte_table[8] = { 1, 2, 3, 4, 6, 8, 10, 13 };
 
@@ -1409,20 +1432,27 @@ int bch2_inode_set_casefold(struct btree_trans *trans, subvol_inum inum,
 	return bch2_maybe_propagate_has_case_insensitive(trans, inum, bi);
 }
 
+/* HACK: injection wrapper, see bch2_inode_rm_fail_content above */
+static int inode_rm_delete_content(struct btree_trans *trans, enum btree_id btree,
+				   unsigned inject_bit, u64 inum, u32 snapshot)
+{
+	if (unlikely(bch2_inode_rm_fail_content & inject_bit)) {
+		bch_err(trans->c, "INJECT: failing %s deletion for inode %llu:%u (caller discards this error)",
+			bch2_btree_id_str(btree), inum, snapshot);
+		return bch_err_throw(trans->c, EIO_fault_injected);
+	}
+
+	return bch2_btree_delete_range_trans(trans, btree,
+					     SPOS(inum, 0, snapshot),
+					     SPOS(inum, U64_MAX, snapshot),
+					     BTREE_UPDATE_internal_snapshot_node);
+}
+
 static noinline int __bch2_inode_rm_snapshot(struct btree_trans *trans, u64 inum, u32 snapshot)
 {
-	bch2_btree_delete_range_trans(trans, BTREE_ID_extents,
-				      SPOS(inum, 0, snapshot),
-				      SPOS(inum, U64_MAX, snapshot),
-				      BTREE_UPDATE_internal_snapshot_node);
-	bch2_btree_delete_range_trans(trans, BTREE_ID_dirents,
-				      SPOS(inum, 0, snapshot),
-				      SPOS(inum, U64_MAX, snapshot),
-				      BTREE_UPDATE_internal_snapshot_node);
-	bch2_btree_delete_range_trans(trans, BTREE_ID_xattrs,
-				      SPOS(inum, 0, snapshot),
-				      SPOS(inum, U64_MAX, snapshot),
-				      BTREE_UPDATE_internal_snapshot_node);
+	inode_rm_delete_content(trans, BTREE_ID_extents, 1, inum, snapshot);
+	inode_rm_delete_content(trans, BTREE_ID_dirents, 2, inum, snapshot);
+	inode_rm_delete_content(trans, BTREE_ID_xattrs, 4, inum, snapshot);
 	try(commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc,
 		      bch2_btree_delete(trans, BTREE_ID_inodes, SPOS(0, inum, snapshot),
 					BTREE_UPDATE_internal_snapshot_node)));
