@@ -1409,20 +1409,35 @@ int bch2_inode_set_casefold(struct btree_trans *trans, subvol_inum inum,
 	return bch2_maybe_propagate_has_case_insensitive(trans, inum, bi);
 }
 
+static int inode_rm_delete_range(struct btree_trans *trans, enum btree_id btree,
+				 u64 inum, u32 snapshot)
+{
+	int ret = bch2_btree_delete_range_trans(trans, btree,
+						SPOS(inum, 0, snapshot),
+						SPOS(inum, U64_MAX, snapshot),
+						BTREE_UPDATE_internal_snapshot_node);
+	/*
+	 * A handled-restart signal (trans_was_restarted) means the range WAS
+	 * fully deleted - the loop retries restarted iterations internally and
+	 * only exits early on real errors. No iterators are held across the
+	 * deletes here, so it's safe to continue:
+	 */
+	return bch2_err_matches(ret, BCH_ERR_transaction_restart) ? 0 : ret;
+}
+
+/*
+ * The content deletes must succeed before the inode key may go: the deletion
+ * scan's premise is "a key in snapshot X implies an inode at (inum, X)", so
+ * deleting the inode key above surviving content strands that content - the
+ * snapshot deletion sweep never visits it, and check_no_data then parks the
+ * snapshot node forever. On any real error the inode key stays, the inum
+ * remains on the deleted list, and the whole removal is retried later.
+ */
 static noinline int __bch2_inode_rm_snapshot(struct btree_trans *trans, u64 inum, u32 snapshot)
 {
-	bch2_btree_delete_range_trans(trans, BTREE_ID_extents,
-				      SPOS(inum, 0, snapshot),
-				      SPOS(inum, U64_MAX, snapshot),
-				      BTREE_UPDATE_internal_snapshot_node);
-	bch2_btree_delete_range_trans(trans, BTREE_ID_dirents,
-				      SPOS(inum, 0, snapshot),
-				      SPOS(inum, U64_MAX, snapshot),
-				      BTREE_UPDATE_internal_snapshot_node);
-	bch2_btree_delete_range_trans(trans, BTREE_ID_xattrs,
-				      SPOS(inum, 0, snapshot),
-				      SPOS(inum, U64_MAX, snapshot),
-				      BTREE_UPDATE_internal_snapshot_node);
+	try(inode_rm_delete_range(trans, BTREE_ID_extents, inum, snapshot));
+	try(inode_rm_delete_range(trans, BTREE_ID_dirents, inum, snapshot));
+	try(inode_rm_delete_range(trans, BTREE_ID_xattrs,  inum, snapshot));
 	try(commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc,
 		      bch2_btree_delete(trans, BTREE_ID_inodes, SPOS(0, inum, snapshot),
 					BTREE_UPDATE_internal_snapshot_node)));
