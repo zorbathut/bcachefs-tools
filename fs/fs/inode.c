@@ -5,6 +5,7 @@
 #include "alloc/accounting.h"
 #include "alloc/buckets.h"
 
+#include "btree/cache.h"
 #include "btree/key_cache.h"
 #include "btree/locking.h"
 #include "btree/write_buffer.h"
@@ -30,6 +31,7 @@
 
 #include "util/varint.h"
 
+#include <linux/module.h>
 #include <linux/random.h>
 #include <linux/unaligned.h>
 
@@ -1409,9 +1411,22 @@ int bch2_inode_set_casefold(struct btree_trans *trans, subvol_inum inum,
 	return bch2_maybe_propagate_has_case_insensitive(trans, inum, bi);
 }
 
+/* HACK, NOT FOR UPSTREAM: on-demand content-delete failure for the deus
+ * seed experiment. Bitmask: 1 = extents, 2 = dirents, 4 = xattrs. */
+static unsigned bch2_inode_rm_fail_content;
+module_param_named(inode_rm_fail_content, bch2_inode_rm_fail_content, uint, 0644);
+
 static int inode_rm_delete_range(struct btree_trans *trans, enum btree_id btree,
 				 u64 inum, u32 snapshot)
 {
+	unsigned inject_bit = btree == BTREE_ID_extents ? 1
+			    : btree == BTREE_ID_dirents ? 2 : 4;
+	if (unlikely(bch2_inode_rm_fail_content & inject_bit)) {
+		bch_err(trans->c, "INJECT: failing %s deletion for inode %llu:%u",
+			bch2_btree_id_str(btree), inum, snapshot);
+		return bch_err_throw(trans->c, EIO_fault_injected);
+	}
+
 	int ret = bch2_btree_delete_range_trans(trans, btree,
 						SPOS(inum, 0, snapshot),
 						SPOS(inum, U64_MAX, snapshot),
