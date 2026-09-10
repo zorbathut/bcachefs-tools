@@ -774,6 +774,9 @@ static unsigned long bch2_btree_cache_scan(struct shrinker *shrink,
 		nr = can_free;
 	}
 
+	if (!nr)
+		goto out;
+
 	unsigned i = 0;
 	list_for_each_entry_safe(b, t, &bc->freeable, list) {
 		/*
@@ -783,10 +786,10 @@ static unsigned long bch2_btree_cache_scan(struct shrinker *shrink,
 		if (++i <= 3)
 			continue;
 
-		touched++;
-
 		if (touched >= nr)
 			goto out;
+
+		touched++;
 
 		if (!btree_node_reclaim(c, b, BTREE_NODE_RECLAIM_shrinker)) {
 			bch2_btree_node_transition_state_locked(bc, b, BTREE_NODE_CACHE_FREED);
