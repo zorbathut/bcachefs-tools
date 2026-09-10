@@ -448,7 +448,7 @@ STORE(bch2_fs)
 		struct shrink_control sc;
 
 		sc.gfp_mask = GFP_KERNEL;
-		sc.nr_to_scan = strtoul_or_return(buf);
+		sc.nr_to_scan = strtoul_or_return(buf) * bch2_btree_cache_shrink_pages(c);
 		bc->live[0].shrink->scan_objects(bc->live[0].shrink, &sc);
 	}
 

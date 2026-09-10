@@ -12,6 +12,15 @@ struct btree_iter;
 
 void bch2_recalc_btree_reserve(struct bch_fs *);
 
+/*
+ * The shrinkers count and scan in pages, not nodes: see the "Shrinker
+ * units" notes in cache.c.
+ */
+static inline unsigned long bch2_btree_cache_shrink_pages(const struct bch_fs *c)
+{
+	return DIV_ROUND_UP(c->opts.btree_node_size, PAGE_SIZE);
+}
+
 void bch2_btree_node_mem_free(struct bch_fs *, struct btree *);
 
 int bch2_btree_node_transition_state(struct bch_fs_btree_cache *, struct btree *,

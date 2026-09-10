@@ -81,6 +81,28 @@
  * any LIVE↔NONE transition and may briefly miss a node that's hash-removed
  * mid-flight. After locking a node returned by lookup, callers must recheck
  * b->hash_val against the expected key to detect reuse.
+ *
+ * Shrinker units
+ * --------------
+ *
+ * The MM shrinker interface is unit-agnostic, but do_shrink_slab() is
+ * calibrated for page-sized objects living alongside the page LRUs: the
+ * per-pass quota is (freeable >> priority) * 4 / seeks, deferred work is
+ * also >> priority, and nothing is scanned until the total reaches a
+ * 128-object batch. Reporting 256 KiB btree nodes as objects made a 76k
+ * node (19 GiB) cache look like a 76k dentry (15 MiB) one: at DEF_PRIORITY
+ * the quota was 18 objects, below the batch floor even with deferral
+ * saturated, so the shrinker was never invoked while kswapd could still
+ * drop page cache or swap. The cache then held ~25 GiB of a 32 GiB box
+ * through an OOM storm.
+ *
+ * So count_objects/scan_objects speak pages: count is nodes * pages per
+ * node, scan converts nr_to_scan back to nodes (rounding up) and reports
+ * freed pages. The default 128-page batch is at least one node at every
+ * supported node size, so a scan call is never asked for less than a
+ * node. seeks keeps its meaning (cost of re-reading a node relative to a
+ * page). The internal bookkeeping - nr_requested, nr_freed, not_freed[]
+ * and the sysfs trigger - stays in nodes.
  */
 
 #include "bcachefs.h"
@@ -727,7 +749,8 @@ static unsigned long bch2_btree_cache_scan(struct shrinker *shrink,
 		container_of(list, struct bch_fs_btree_cache, live[list->idx]);
 	struct bch_fs *c = container_of(bc, struct bch_fs, btree.cache);
 	struct btree *b, *t;
-	unsigned long nr = sc->nr_to_scan;
+	unsigned long pages_per_node = bch2_btree_cache_shrink_pages(c);
+	unsigned long nr = DIV_ROUND_UP(sc->nr_to_scan, pages_per_node);
 	unsigned long can_free = 0;
 	unsigned long freed = 0;
 	unsigned long touched = 0;
@@ -806,19 +829,22 @@ out:
 
 	event_inc_trace(c, btree_cache_scan, buf,
 		prt_printf(&buf, "scanned %li nodes, can free %li, freed %li",
-			   sc->nr_to_scan, can_free, freed));
-	return freed;
+			   nr, can_free, freed));
+	return freed * pages_per_node;
 }
 
 static unsigned long bch2_btree_cache_count(struct shrinker *shrink,
 					    struct shrink_control *sc)
 {
 	struct btree_cache_list *list = shrink->private_data;
+	struct bch_fs_btree_cache *bc =
+		container_of(list, struct bch_fs_btree_cache, live[list->idx]);
+	struct bch_fs *c = container_of(bc, struct bch_fs, btree.cache);
 
 	if (static_branch_unlikely(&bch2_btree_shrinker_disabled))
 		return 0;
 
-	return btree_cache_can_free(list);
+	return btree_cache_can_free(list) * bch2_btree_cache_shrink_pages(c);
 }
 
 #ifdef HAVE_SHRINKER_TO_TEXT
