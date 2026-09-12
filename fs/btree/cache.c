@@ -1011,7 +1011,7 @@ struct btree *bch2_btree_node_mem_alloc(struct btree_trans *trans, bool pcpu_rea
 	 */
 	if (unlikely(system_memory_usage_high(c))) {
 		bc->nr_self_reclaim++;
-		b = bch2_btree_node_grab(c, &bc->live[pcpu_read_locks].clean, pcpu_read_locks, 0);
+		b = bch2_btree_node_grab(c, &bc->live[0].clean, pcpu_read_locks, 0);
 		if (b)
 			goto got_mem;
 	}
