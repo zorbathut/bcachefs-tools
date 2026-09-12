@@ -155,6 +155,14 @@ enum bch_counters_flags {
 	  "Btree cache cannibalize lock failures")			\
 	x(btree_cache_cannibalize_unlock,	12,  TYPE_COUNTER,	\
 	  "Btree cache cannibalize lock releases")			\
+	x(btree_cache_alloc_freeable,		136, TYPE_COUNTER,	\
+	  "Btree node allocations served from the freeable list")	\
+	x(btree_cache_alloc_self_reclaim,	137, TYPE_COUNTER,	\
+	  "Btree node allocations served by evicting a clean node")	\
+	x(btree_cache_alloc_mm_not_high,	138, TYPE_COUNTER,	\
+	  "Btree node allocations from MM: memory usage not high")	\
+	x(btree_cache_alloc_mm_grab_fail,	139, TYPE_COUNTER,	\
+	  "Btree node allocations from MM: self-reclaim found no node") \
 	x(btree_node_write,			13,  TYPE_COUNTER,	\
 	  "Btree node writes")						\
 	x(btree_node_read,			14,  TYPE_COUNTER,	\

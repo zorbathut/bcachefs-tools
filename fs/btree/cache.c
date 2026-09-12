@@ -1000,20 +1000,30 @@ struct btree *bch2_btree_node_mem_alloc(struct btree_trans *trans, bool pcpu_rea
 	u64 start_time = local_clock();
 
 	struct btree *b = bch2_btree_node_grab(c, &bc->freeable, pcpu_read_locks, 0);
-	if (b)
+	if (b) {
+		event_inc(c, btree_cache_alloc_freeable);
 		goto got_mem;
+	}
 
 	/*
 	 * If MM is tight AND we're a meaningful fraction of in-use memory,
 	 * reclaim from our own cache instead of asking MM. MM's shrinker
 	 * callbacks haven't been aggressive enough to keep bcachefs out of
 	 * OOM under heavy load (TiCPU report).
+	 *
+	 * The four btree_cache_alloc_* counters split every allocation by
+	 * how it was satisfied; the two _mm_ ones are cache growth.
 	 */
 	if (unlikely(system_memory_usage_high(c))) {
 		bc->nr_self_reclaim++;
 		b = bch2_btree_node_grab(c, &bc->live[0].clean, pcpu_read_locks, 0);
-		if (b)
+		if (b) {
+			event_inc(c, btree_cache_alloc_self_reclaim);
 			goto got_mem;
+		}
+		event_inc(c, btree_cache_alloc_mm_grab_fail);
+	} else {
+		event_inc(c, btree_cache_alloc_mm_not_high);
 	}
 
 	struct btree_node_bufs bufs = { .byte_order = ilog2(c->opts.btree_node_size) };
@@ -1966,6 +1976,20 @@ __cold void bch2_btree_cache_to_text(struct printbuf *out, const struct bch_fs_b
 	prt_btree_cache_line(out, c, "dirty:",		bc->live[0].nr_dirty + bc->live[1].nr_dirty);
 	prt_btree_cache_line(out, c, "in flight:",	atomic_long_read(&bc->nr_in_flight));
 	prt_printf(out, "cannibalize lock:\t%s\n",	bc->alloc_lock ? "held" : "not held");
+	prt_newline(out);
+
+	size_t avail = si_mem_available(), total = totalram_pages();
+	prt_printf(out, "system memory:\n");
+	prt_printf(out, "  total:\t");
+	prt_human_readable_u64(out, total << PAGE_SHIFT);
+	prt_newline(out);
+	prt_printf(out, "  available:\t");
+	prt_human_readable_u64(out, avail << PAGE_SHIFT);
+	prt_newline(out);
+	prt_printf(out, "  self-reclaim below:\t");
+	prt_human_readable_u64(out, (total >> 2) << PAGE_SHIFT);
+	prt_newline(out);
+	prt_printf(out, "  usage high:\t%s\n", system_memory_usage_high(c) ? "yes" : "no");
 	prt_newline(out);
 
 	for (unsigned i = 0; i < ARRAY_SIZE(bc->nr_by_btree); i++) {
