@@ -869,6 +869,54 @@ static unsigned long bch2_btree_cache_count(struct shrinker *shrink,
 #ifdef __KERNEL__
 #define BTREE_CACHE_OOM_BUF_SIZE	(16 << 10)
 
+/*
+ * Who is driving the btree right now: active transactions grouped by
+ * transaction fn, with the comm of the first task seen for each. Idle
+ * per-cpu cached transactions stay on the list with task == NULL and are
+ * skipped. trylock only - we're inside the OOM path and must not wait.
+ */
+static void btree_trans_summary_to_text(struct printbuf *out, struct bch_fs *c)
+{
+	struct { const char *fn; char comm[TASK_COMM_LEN]; unsigned nr; } fns[32];
+	unsigned nr_fns = 0, nr_active = 0, nr_other = 0;
+
+	if (!seqmutex_trylock(&c->btree.trans.lock)) {
+		prt_printf(out, "active btree transactions: (list locked)\n");
+		return;
+	}
+
+	struct btree_trans *trans;
+	list_for_each_entry(trans, &c->btree.trans.list, list) {
+		struct task_struct *task = READ_ONCE(trans->locking_wait.task);
+		if (!task)
+			continue;
+		nr_active++;
+
+		unsigned i;
+		for (i = 0; i < nr_fns; i++)
+			if (fns[i].fn == trans->fn)
+				break;
+		if (i < nr_fns) {
+			fns[i].nr++;
+		} else if (nr_fns < ARRAY_SIZE(fns)) {
+			fns[nr_fns].fn = trans->fn;
+			fns[nr_fns].nr = 1;
+			get_task_comm(fns[nr_fns].comm, task);
+			nr_fns++;
+		} else {
+			nr_other++;
+		}
+	}
+	seqmutex_unlock(&c->btree.trans.lock);
+
+	prt_printf(out, "active btree transactions: %u\n", nr_active);
+	for (unsigned i = 0; i < nr_fns; i++)
+		prt_printf(out, "  %s\t%u (%s)\n",
+			   fns[i].fn ?: "(unknown)", fns[i].nr, fns[i].comm);
+	if (nr_other)
+		prt_printf(out, "  (other)\t%u\n", nr_other);
+}
+
 static int bch2_btree_cache_oom_notify(struct notifier_block *nb,
 				       unsigned long unused, void *freed)
 {
@@ -882,6 +930,8 @@ static int bch2_btree_cache_oom_notify(struct notifier_block *nb,
 	struct printbuf out = PRINTBUF_EXTERN(bc->oom_buf, BTREE_CACHE_OOM_BUF_SIZE);
 	prt_printf(&out, "btree cache at OOM:\n");
 	bch2_btree_cache_to_text(&out, bc);
+	prt_newline(&out);
+	btree_trans_summary_to_text(&out, c);
 	prt_newline(&out);
 	bch2_sb_recent_counters_to_text(&out, &c->counters);
 	bch2_print_str(c, KERN_ERR, out.buf);
