@@ -296,6 +296,13 @@ struct bch_fs_btree_cache {
 	size_t			nr_requested;
 	u64			not_freed[BCH_BTREE_CACHE_NOT_FREED_REASONS_NR];
 
+#ifdef __KERNEL__
+	/* OOM diagnostics: see "OOM notifier" in cache.c */
+	struct notifier_block	oom_notifier;
+	struct ratelimit_state	oom_ratelimit;
+	char			*oom_buf;
+#endif
+
 	/*
 	 * Times the allocator hit the memory-pressure self reclaim path:
 	 * journal replay watches for this going nonzero to switch off the

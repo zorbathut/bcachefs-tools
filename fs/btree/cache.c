@@ -103,6 +103,21 @@
  * node. seeks keeps its meaning (cost of re-reading a node relative to a
  * page). The internal bookkeeping - nr_requested, nr_freed, not_freed[]
  * and the sysfs trigger - stays in nodes.
+ *
+ * OOM notifier
+ * ------------
+ *
+ * The kernel's OOM report lists slabs and (with allocation profiling) our
+ * vmalloc total, but nothing about why the cache is that size: clean vs
+ * dirty, the self-reclaim threshold inputs, or the recent allocation-
+ * outcome counters. Kernels with shrinker->to_text get that in the OOM
+ * dump; this one doesn't, so we register an OOM notifier - called by
+ * out_of_memory() for global (not memcg) OOMs before a victim is chosen -
+ * and print the same text as sysfs internal/btree_cache plus the recent
+ * counters. Runs in the allocating task's context under oom_lock, so it
+ * must not allocate: the printbuf is a buffer preallocated at init, and
+ * output is rate-limited to one dump per 5 s per filesystem. Diagnostic
+ * only: it frees nothing.
  */
 
 #include "bcachefs.h"
@@ -124,6 +139,7 @@
 #include "sb/counters.h"
 
 #include <linux/module.h>
+#include <linux/oom.h>
 #include <linux/prefetch.h>
 #include <linux/sched/mm.h>
 #include <linux/swap.h>
@@ -849,6 +865,58 @@ static unsigned long bch2_btree_cache_count(struct shrinker *shrink,
 
 	return btree_cache_can_free(list) * bch2_btree_cache_shrink_pages(c);
 }
+
+#ifdef __KERNEL__
+#define BTREE_CACHE_OOM_BUF_SIZE	(16 << 10)
+
+static int bch2_btree_cache_oom_notify(struct notifier_block *nb,
+				       unsigned long unused, void *freed)
+{
+	struct bch_fs_btree_cache *bc =
+		container_of(nb, struct bch_fs_btree_cache, oom_notifier);
+	struct bch_fs *c = container_of(bc, struct bch_fs, btree.cache);
+
+	if (!bc->oom_buf || !__ratelimit(&bc->oom_ratelimit))
+		return NOTIFY_OK;
+
+	struct printbuf out = PRINTBUF_EXTERN(bc->oom_buf, BTREE_CACHE_OOM_BUF_SIZE);
+	prt_printf(&out, "btree cache at OOM:\n");
+	bch2_btree_cache_to_text(&out, bc);
+	prt_newline(&out);
+	bch2_sb_recent_counters_to_text(&out, &c->counters);
+	bch2_print_str(c, KERN_ERR, out.buf);
+	return NOTIFY_OK;
+}
+
+static int bch2_btree_cache_oom_notifier_init(struct bch_fs_btree_cache *bc)
+{
+	bc->oom_buf = kmalloc(BTREE_CACHE_OOM_BUF_SIZE, GFP_KERNEL);
+	if (!bc->oom_buf)
+		return -ENOMEM;
+
+	ratelimit_state_init(&bc->oom_ratelimit, 5 * HZ, 1);
+	bc->oom_notifier.notifier_call = bch2_btree_cache_oom_notify;
+
+	int ret = register_oom_notifier(&bc->oom_notifier);
+	if (ret) {
+		kfree(bc->oom_buf);
+		bc->oom_buf = NULL;
+	}
+	return ret;
+}
+
+static void bch2_btree_cache_oom_notifier_exit(struct bch_fs_btree_cache *bc)
+{
+	if (bc->oom_buf) {
+		unregister_oom_notifier(&bc->oom_notifier);
+		kfree(bc->oom_buf);
+		bc->oom_buf = NULL;
+	}
+}
+#else
+static inline int bch2_btree_cache_oom_notifier_init(struct bch_fs_btree_cache *bc) { return 0; }
+static inline void bch2_btree_cache_oom_notifier_exit(struct bch_fs_btree_cache *bc) {}
+#endif
 
 #ifdef HAVE_SHRINKER_TO_TEXT
 #include <linux/seq_buf.h>
@@ -1695,6 +1763,9 @@ int bch2_fs_btree_cache_init(struct bch_fs *c)
 	shrink->private_data	= &bc->live[1];
 	shrinker_register(shrink);
 
+	if (bch2_btree_cache_oom_notifier_init(bc))
+		return bch_err_throw(c, ENOMEM_fs_btree_cache_init);
+
 	return 0;
 }
 
@@ -1773,6 +1844,7 @@ void bch2_fs_btree_cache_exit(struct bch_fs *c)
 	struct bch_fs_btree_cache *bc = &c->btree.cache;
 	struct btree *b, *t;
 
+	bch2_btree_cache_oom_notifier_exit(bc);
 	shrinker_free(bc->live[1].shrink);
 	shrinker_free(bc->live[0].shrink);
 
