@@ -1054,6 +1054,8 @@ void bch2_btree_node_read(struct btree_trans *trans, struct btree *b,
 	int ret;
 
 	trace_btree_node(c, b, btree_node_read);
+	if (b->c.btree_id < BTREE_ID_NR)
+		atomic64_inc(&c->btree.cache.nr_reads_by_btree[b->c.btree_id]);
 
 	ret = bch2_bkey_pick_read_device(c, bkey_i_to_s_c(&b->key),
 					 NULL, &pick, 0, 0);

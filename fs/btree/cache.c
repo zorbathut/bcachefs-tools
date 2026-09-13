@@ -2068,7 +2068,8 @@ __cold void bch2_btree_cache_to_text(struct printbuf *out, const struct bch_fs_b
 		bch2_btree_id_to_text(out, i);
 		prt_printf(out, "\t");
 		prt_human_readable_u64(out, bc->nr_by_btree[i] * c->opts.btree_node_size);
-		prt_printf(out, " (%zu)\n", bc->nr_by_btree[i]);
+		prt_printf(out, " (%zu)  reads %llu\n", bc->nr_by_btree[i],
+			   (u64) atomic64_read(&bc->nr_reads_by_btree[i]));
 	}
 
 	prt_newline(out);

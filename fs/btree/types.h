@@ -284,6 +284,8 @@ struct bch_fs_btree_cache {
 	size_t			nr_freeable;
 	size_t			nr_reserve;
 	size_t			nr_by_btree[BTREE_ID_NR];
+	/* node reads since mount, by btree: attributes cache churn */
+	atomic64_t		nr_reads_by_btree[BTREE_ID_NR];
 
 	/* Number of nodes with BTREE_NODE_write_in_flight set. */
 	atomic_long_t		nr_in_flight;
